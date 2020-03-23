@@ -17,7 +17,7 @@ from esmvaltool.diag_scripts.shared import run_diagnostic
 
 # helper functions
 import extraUtils as xu
-from shared import _load_variable
+from shared import _load_variable, _get_obs_data_zonal
 
 
 # Classes and settings
@@ -40,7 +40,6 @@ def _get_fig_config(diag_config):
         'valrange_x': (2, 1000),
         'valrange_y': (-70, 90),
         'bandsize': 1.86,
-        'obs_label': 'Carvalhais2014',
         'gpp_threshold': 10,  # gC m-2 yr -1
     }
     fig_config.update(diag_config.get('fig_config'))
@@ -61,38 +60,6 @@ def _apply_common_mask(dat_1, dat_2):
     dat_1 = np.ma.masked_invalid(dat_1)
     dat_2 = np.ma.masked_invalid(dat_2)
     return dat_1, dat_2
-
-
-def _get_obs_data(diag_config):
-    '''
-    Get and handle the observations of turnover time from Carvalhais 2014.
-
-    Arguments:
-        diag_config - nested dictionary of metadata
-
-    Returns:
-        dictionary with observation data with different variables as keys
-    '''
-    if not diag_config.get('obs_files'):
-        raise ValueError('The observation files needs to be specified in the '
-                         'recipe (see recipe description for details)')
-    else:
-        input_files = [
-            os.path.join(diag_config['auxiliary_data_dir'], obs_file)
-            for obs_file in diag_config.get('obs_files')
-        ]
-    all_data = {}
-    var_list = diag_config.get('obs_variables')
-    for v_ind in range(len(var_list)):
-        var_obs = var_list[v_ind]
-        variable_constraint = iris.Constraint(
-            cube_func=(lambda c: c.var_name == var_obs))
-        cube = iris.load_cube(input_files, constraint=variable_constraint)
-        all_data[var_obs] = cube.data
-    for coord in cube.coords():
-        all_data[coord.name()] = coord.points
-    return all_data
-
 
 def _get_zonal_tau(diag_config):
     '''
@@ -116,9 +83,9 @@ def _get_zonal_tau(diag_config):
         zonal_tau_mod[key] = {}
         ctotal = _load_variable(value, 'ctotal')
         gpp = _load_variable(value, 'gpp')
-        zonal_tau_mod[key]['data'] = _calc_zonal_tau(gpp, ctotal, fig_config)
+        zonal_tau_mod[key] = _calc_zonal_tau(gpp, ctotal, fig_config)
 
-    zonal_tau_obs = _get_obs_data(diag_config)
+    zonal_tau_obs = _get_obs_data_zonal(diag_config)
     # plot the figure
     _plot_zonal_tau(zonal_tau_mod, zonal_tau_obs, diag_config)
     return 'done plotting the zonal turnover time'
@@ -150,7 +117,7 @@ def _calc_zonal_tau(gpp, ctotal, fig_config):
                                         iris.analysis.SUM, window_size)
 
     zonal_tau = ctotal_z / gpp_z
-    zonal_tau.data = zonal_tau.core_data() / (86400 * 365)
+    zonal_tau.convert_units('yr')
 
     return zonal_tau
 
@@ -174,34 +141,39 @@ def _plot_zonal_tau(all_mod_dat, all_obs_dat, diag_config):
     fig_config = _get_fig_config(diag_config)
     models = list(all_mod_dat.keys())
     models = sorted(models, key=str.casefold)
+    multiModels = 'MultiModelMedian MultiModelMean'.split()
+    for _mm in multiModels:
+        if _mm in models:
+            models.append(models.pop(models.index(_mm)))
     nmodels = len(models)
 
     lats_obs = all_obs_dat['latitude']
-    tau_obs = all_obs_dat['tau_ctotal']
-    tau_obs_5 = all_obs_dat['tau_ctotal_5']
-    tau_obs_95 = all_obs_dat['tau_ctotal_95']
+    obs_var = diag_config.get('obs_variable')[0]
+    tau_obs = all_obs_dat[obs_var]
+    tau_obs_5 = all_obs_dat[obs_var+'_5']
+    tau_obs_95 = all_obs_dat[obs_var+'_95']
 
     plt.figure(figsize=(3, 5))
 
     sp0 = plt.subplot(1, 1, 1)
-    sp0.plot(tau_obs, lats_obs, color='k', lw=1.5,
-             label=fig_config['obs_label'])
-    sp0.fill_betweenx(lats_obs,
-                      tau_obs_5,
-                      tau_obs_95,
+    sp0.plot(tau_obs.data, lats_obs.points, color='k', lw=1.5,
+             label=diag_config['obs_info']['source_label'])
+    sp0.fill_betweenx(lats_obs.points,
+                      tau_obs_5.data,
+                      tau_obs_95.data,
                       facecolor='grey',
                       alpha=0.40)
 
     for row_m in range(nmodels):
         row_mod = models[row_m]
-        dat_mod_tau = all_mod_dat[row_mod]['data']
+        dat_mod_tau = all_mod_dat[row_mod]
         lats_mod = dat_mod_tau.coord('latitude')
-        if row_mod == 'MultiModelMedian':
+        if row_mod in ['MultiModelMedian', 'MultiModelMean']:
             sp0.plot(dat_mod_tau.data,
                      lats_mod.points,
                      lw=1.5,
                      color='blue',
-                     label='Multimodel')
+                     label=row_mod)
         else:
             sp0.plot(dat_mod_tau.data,
                      lats_mod.points,
@@ -214,17 +186,17 @@ def _plot_zonal_tau(all_mod_dat, all_obs_dat, diag_config):
     plt.xlim(fig_config['valrange_x'][0], fig_config['valrange_x'][1])
     plt.ylim(fig_config['valrange_y'][0], fig_config['valrange_y'][1])
     plt.axhline(y=0, lw=0.48, color='grey')
-    x_lab = '$\\tau$'
-    plt.xlabel(x_lab, fontsize=fig_config['ax_fs'])
-    plt.ylabel('Latitude ($^\\circ N$)',
-               fontsize=fig_config['ax_fs'],
+    plt.xlabel(tau_obs.standard_name, fontsize=fig_config['ax_fs'])
+    plt.ylabel('{name} ({unit})'.format(name=lats_obs.long_name,unit=lats_obs.units), fontsize=fig_config['ax_fs'],
                ma='center')
     xu.rem_axLine(['top', 'right'])
 
-    local_path = diag_config['plot_dir']
-    png_name = ('comparison_zonal_turnovertime_'
-                + fig_config['obs_label'] + '.png')
-    plt.savefig(os.path.join(local_path, png_name),
+    png_name = '{title}_{source_label}_{grid_label}z.png'.format(
+    title=tau_obs.long_name,
+    source_label=diag_config['obs_info']['source_label'],
+    grid_label=diag_config['obs_info']['grid_label'])
+
+    plt.savefig(os.path.join(diag_config['plot_dir'], png_name),
                 bbox_inches='tight',
                 bbox_extra_artists=[leg],
                 dpi=450)
